@@ -8,7 +8,7 @@ Calibrated variable (GWL = g, Soil moisture = s)
 g
 
 Number of runs
-1
+10
 
 Objective function
 1
