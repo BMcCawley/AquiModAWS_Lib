@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -264,3 +265,173 @@ class AquiModAWS:
     def read_timeseries_output(self):
         """Read output timeseries files"""
         pass
+
+    def _cce(
+        self,
+        complx: dict[str, pd.DataFrame],
+        simplx_size: int,
+        alpha: int,
+        reflection_coef=1,
+        contraction_coef=0.5,
+    ):
+        """
+        q: number of points in simplex [2 <= q <= m]
+        m: number of points in complex
+        alpha: user-defined number of evolution iterations per simplex [alpha >= 1]
+        beta: [beta >= 1]
+
+        1. Assign weights to each point in the complex
+        2. Randomly select weighted simplex points
+        3. Reorder simplex by best performing points
+        4. Compute the centroid of the simplex
+        5. Reflect the worst performing point through the centroid
+        6. Check that the new point is within the parameter space/smallest complx hypercube:
+            - If true, go to 8
+            - If false, go to 7
+        7. Generate random point within the parameter space (mutation)
+        8. Run AquiMod for new point (either new or new) to get NSE
+        9. Check that new point performs better than previous worst point:
+            - If true, go to 15
+            - If false, go to 10
+        10. Contract the worst performing point towards the centroid
+        11. Run AquiMod for new point to get NSE
+        12. Check that new point performs better than previous worst point:
+            - If true, go to 15
+            - If false, go to 13
+        13. Generate random point within the parameter space (mutation)
+        14. Run AquiMod with the new point
+        15. Replace worst performing point with new point
+        16. Repeat steps 4 - 15 alpha times where alpha >= 1
+        """
+        # I have just realised that I can't do CCE steps individually on components
+        # Because they need to all be done together for control flow purposes
+        # I could either break up the for loop  for the control flow checks
+        # I could also save the complx keys and df column names as a mapping
+        # and then use the mapping to recreate the separate dictionary entries
+
+        # Convert complx from dictionary to a single dataframe
+        complx_df = pd.concat(complx.values(), axis=1)
+
+        m = len(complx_df)
+        # 1. Calculate triangular distribution
+        # Make sure that complx is ordered by ObjectiveFunction
+        complx_df = complx_df.sort_by("ObjectiveFunction", ascending=False)
+        complx_df["weight"] = (2 * (m + 1 + range(1, m + 1))) / (m * (m + 1))
+        # Normalise weights so that their sum == 1
+        complx_df["weight"] /= complx["weight"].sum()
+        # 2. Select simplx points from weighted complx points
+        simplx = complx_df.loc[
+            np.random.choice(
+                complx_df.index, simplx_size, replace=False, p=complx_df["weight"]
+            )
+        ]
+        for _ in range(alpha):
+            # 3. Restore order to simplx
+            simplx = simplx.sort_by("ObjectiveFunction", ascending=False)
+            # 4. Compute centroid of simplx
+            centroid = simplx.mean().to_frame().T
+            # Drop weight and ObjectiveFunction value of centroid
+            # centroid = centroid.drop(["ObjectiveFunction", "weight"], axis=1)
+            # 5. Perform reflection step of the worst performing point through centroid
+            worst = simplx.iloc[-1]
+            worst = worst.reset_index(drop=True)
+            new = centroid + reflection_coef * (centroid - worst)
+            new = new.reset_index(drop=True)  # is this necessary? yes
+            # 6. Check that the new point is still within parameter space
+            # Get parameter bounds
+            parameter_lims = pd.concat(self.calibration_parameters.values())
+            within_parameter_space = True
+            for col in new.columns:
+                minimum = parameter_lims.loc["min", col]
+                maximum = parameter_lims.loc["max", col]
+                if not minimum <= new.loc[0, col] <= maximum:
+                    within_parameter_space = False
+            # 7. If new point is outside parameter space, perform mutation instead
+            if not within_parameter_space:
+                # Mutation performed nut labelled as reflection
+                # Current parameter calibration limits define parameter space
+                # Although not the smallest possible complx hypercube
+                # Can try and implement this version later
+                self.run(sim_mode="c", num_runs=1)
+            # 8.
+            else:
+                # Run AquiMod using the new point
+                # AquiMod must be run in evaluation mode for this
+                # Evaluation files need to be written for each module
+                # Need to separate new into components
+                eval_params = {
+                    component: new[df.cols] for component, df in complx.items()
+                }
+
+                self.evaluation_parameters = eval_params
+                self.run(sim_mode="e", num_runs=1)
+
+            new = pd.concat(self.read_performance_output().values(), axis=1)
+            # 9. Check if new point performs worse than worst point
+            if new.loc[0, "ObjectiveFunction"] < worst[0, "ObjectiveFunction"]:
+                # 10. Contract the worst performing point towards the centroid
+                new = worst + contraction_coef * (centroid - worst)
+                eval_params = {
+                    component: new[df.cols] for component, df in complx.items()
+                }
+                self.evaluation_parameters = eval_params
+                # 11. Run AquiMod for new point
+                self.run(sim_mode="e", num_runs=1)
+                new = pd.concat(self.read_performance_output().values(), axis=1)
+            # 12. Check if new point performs worse than the worst point
+            if new.loc[0, "ObjectiveFunction"] < worst[0, "ObjectiveFunction"]:
+                # 13. Generate random point within parameter space
+                # 14. Run AquiMod for new point
+                self.run(sim_mode="c", num_runs=1)
+                new = pd.concat(self.read_performance_output().values(), axis=1)
+            # 15. Replace worst performing point with new point in simplx
+            simplx.iloc[-1] = new
+
+        complx_df.loc[simplx.index] = simplx
+
+    def calibrate(
+        self, num_complexes: int, complex_size: int, simplex_size: int, alpha: int
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Calibrate model according to the shuffled complex evolution algorithm.
+
+        n: number of dimensions (parameters/degrees of freedom) to calibrate
+        p: number of complexes [p >= 1]
+        m: number of points in each complex [m >= n+1]
+        q: number of points in simplex [2 <= q <= m]
+
+        sample_size: initial sample size [s = p * m]
+
+        1. Run AquiMod for s random points in the parameter space.
+        2. Sort s points in order from best objective function value.
+        3. Partition points into p complexes of m points.
+            - Points partitioned in repeating order [1:a, 2:b, 3:c, 4:a, 5:b, 6:c]
+        4. Evolve each complex according to CCE algorithm.
+        5. Shuffle complexes.
+            - Combine points in evolved complexes back into a single population
+            - Sort the population in rank order
+            - Repartition into complexes as before
+        6. Check for convergence criteria
+            - Stop if maximum number of trials reached
+            - Stop if objective function value not significantly increased
+        7. Return to step 3/4.
+        """
+        # Total sample points
+        sample_size = num_complexes * complex_size
+        # 1. Run AquiMod for all points
+        self.run(sim_mode="c", num_runs=sample_size)
+        # 2. Get results (returned in order of ObjectiveFunction by default)
+        population = self.read_performance_output()
+        # DO AWAY WITH DICTIONARY STRUCTURE HERE
+        # 3. Partition into complexes
+        complxes: list[dict[str, pd.DataFrame]] = []
+        for i in range(num_complexes):
+            complx: dict[str, pd.DataFrame] = {}
+            # Create one complex as a dictionary of dataframes
+            for component, df in population.items():
+                # Create a boolean mask to select rows of the i-th complex
+                bool_mask = [(j % num_complexes) == i for j in range(len(df))]
+                complx[component] = df.iloc[bool_mask]
+            # 4. Implement CCE algorithm here on the complex
+            complx = self._cce(complx, simplex_size, alpha)
+
