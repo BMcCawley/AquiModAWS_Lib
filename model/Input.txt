@@ -1,14 +1,14 @@
 Component IDs
-1 1 1
+1 1 6
 
 Simulation mode
-c
+e
 
 Calibrated variable (GWL = g, Soil moisture = s)
 g
 
 Number of runs
-10
+1
 
 Objective function
 1
@@ -23,4 +23,4 @@ Maximum number of acceptable models (calibration only)
 1000
 
 Write model output files
-Y Y Y
+N N N

@@ -1,8 +1,8 @@
 k(-)
-1.8 3.6
+0.01 10
 
-lambda(-)
-0.5 1.2
+lambda(timestep)
+0.1 100
 
 n(timsteps)
-75 160
+10 1000

@@ -1,8 +1,17 @@
 import os
+import subprocess
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# TODO add logging functionality to calibration
+# TODO add parallel computing ability
+# TODO maybe switch from evaluation mode to exclusive calibration mode for performance
+# TODO follow SCE algorithm more closely and separate the performance and parameters
+# that way I can then run
+# TODO for some reason, AquiModAWS sometimes doesn't put any rows in the output files
+# so I need to work out if this is just an AquiModAWS problem or not
 
 
 class AquiModAWS:
@@ -41,7 +50,7 @@ class AquiModAWS:
         line = self._read_line(self.input_path, 1).split(" ")
         return {
             "soil": int(line[0]),
-            "unstaurated": int(line[1]),
+            "unsaturated": int(line[1]),
             "saturated": int(line[2]),
         }
 
@@ -64,7 +73,7 @@ class AquiModAWS:
     @property
     def number_of_runs(self) -> int:
         """Get number of runs from input file"""
-        return self._read_line(self.input_path, 10)
+        return int(self._read_line(self.input_path, 10))
 
     @number_of_runs.setter
     def number_of_runs(self, num_runs: int):
@@ -74,7 +83,7 @@ class AquiModAWS:
     @property
     def calibrated_variable(self) -> str:
         """Get calibrated variable from input file"""
-        self._read_line(self.input_path, 7)
+        return self._read_line(self.input_path, 7)
 
     @calibrated_variable.setter
     def calibrated_variable(self, variable: str):
@@ -82,54 +91,99 @@ class AquiModAWS:
         self._edit_line(self.input_path, 7, variable)
 
     @property
+    def performance_threshold(self) -> int:
+        """Get acceptable model threshold from input file"""
+        return self._read_line(self.input_path, 19)
+
+    @performance_threshold.setter
+    def performance_threshold(self, threshold: float):
+        """Set acceptable model threshold in input file"""
+        self._edit_line(self.input_path, 19, threshold)
+
+    @property
+    def write_outputs(self) -> list[str]:
+        """Get 'Write model output files' options from input file"""
+        return self._read_line(self.input_path, 25)
+
+    @write_outputs.setter
+    def write_outputs(self, write_outputs: list[str]):
+        self._edit_line(self.input_path, 25, " ".join(write_outputs))
+
+    @property
     def module_names(self) -> dict[str, str]:
         """Get module names"""
-        df_dict = {
-            "soil": self._model_data[self._model_data["component"] == "soil"],
-            "unsaturated": self._model_data[
-                self._model_data["component"] == "unsaturated"
-            ],
-            "saturated": self._model_data[self._model_data["component"] == "saturated"],
-        }
-        modules = self.module_config
+        # df_dict = {
+        #     "soil": self._model_data[self._model_data["component"] == "soil"],
+        #     "unsaturated": self._model_data[
+        #         self._model_data["component"] == "unsaturated"
+        #     ],
+        #     "saturated": self._model_data[self._model_data["component"] == "saturated"],
+        # }
+        # modules = self.module_config
 
-        return {
-            component: df[
-                df["module_number"] == modules[component], "module_name"
-            ].unique()[0]
-            for component, df in df_dict.items()
-        }
+        # return {
+        #     component: df[
+        #         df["module_number"] == modules[component], "module_name"
+        #     ].unique()[0]
+        #     for component, df in df_dict.items()
+        # }
+        output = {}
+        for component, module_number in self.module_config.items():
+            df = self._model_data[self._model_data["component"] == component]
+            df = df[df["module_number"] == module_number]
+            df = df.reset_index(drop=True)
+            output[component] = df.loc[0, "module_name"]
+
+        return output
 
     @property
     def parameters(self) -> dict[str, list[str]]:
-        """Get parameter names as list value for each component key"""
-        return {
-            module_name: list(
-                self._model_data[
-                    self._model_data["module_name"] == module_name, "component_name"
-                ].unique()
-            )
-            for module_name in self.module_names.values()
-        }
+        """Get parameter names as list value for each parameter key"""
+        # return {
+        #     module_name: list(
+        #         self._model_data[
+        #             self._model_data["module_name"] == module_name, "component_name"
+        #         ].unique()
+        #     )
+        #     for module_name in self.module_names.values()
+        # }
+
+        output = {}
+        for module_name in self.module_names.values():
+            df = self._model_data[self._model_data["module_name"] == module_name]
+            output[module_name] = df["parameter"].to_list()
+        return output
 
     @property
     def parameter_line_numbers(self) -> dict[str, int]:
         """Get parameter line numbers as a dictionary with parameter as key"""
-        return {
-            parameter: self._model_data[
-                (self._model_data["module_name"] == module)
-                & (self._model_data["parameter"] == parameter),
-                "line_number",
-            ].unique()[0]
-            for module, parameter in self.parameters.items()
-        }
+        # return {
+        #     parameter: self._model_data[
+        #         (self._model_data["module_name"] == module)
+        #         & (self._model_data["parameter"] == parameter),
+        #         "line_number",
+        #     ].unique()[0]
+        #     for module, parameter in self.parameters.items()
+        # }
+
+        output = {}
+        for module, parameter_list in self.parameters.items():
+            for parameter in parameter_list:
+                # df = self._model_data
+                # df = df[(df["module_name"] == module) & (df["parameter"] == parameter)]
+                # df = df.reset_index(drop=True)
+                # output[parameter] = df.loc[0, "line_number"]
+
+                df = self._model_data.set_index(["module_name", "parameter"])
+                output[parameter] = df.loc[(module, parameter), "line_number"]
+        return output
 
     @property
     def calibration_paths(self) -> dict[str, Path]:
         """Get paths to calibration files"""
         return {
             component: Path(self.model_dir, "Calibration", module_name + "_calib.txt")
-            for component, module_name in self.module_names
+            for component, module_name in self.module_names.items()
         }
 
     @property
@@ -137,7 +191,7 @@ class AquiModAWS:
         """Get paths to evaluation files"""
         return {
             component: Path(self.model_dir, "Evaluation", module_name + "_eval.txt")
-            for component, module_name in self.module_names
+            for component, module_name in self.module_names.items()
         }
 
     @property
@@ -174,6 +228,8 @@ class AquiModAWS:
         elif self.calibrated_variable == "s":
             path_dict["fit"] = Path(self.model_dir, "Output", "fit_eval_SM.out")
 
+        return path_dict
+
     @property
     def calibration_parameters(self) -> dict[str, pd.DataFrame]:
         """
@@ -187,9 +243,10 @@ class AquiModAWS:
             # Instantiate inner dictionary
             inner = {}
             # Loop through each parameter in the current component
-            for parameter in self.parameters[component]:
+            module = self.module_names[component]
+            for parameter in self.parameters[module]:
                 # Get min and max value for each parameter as string
-                minmax = self._read_line(path, self._parameter_line_numbers[parameter])
+                minmax = self._read_line(path, self.parameter_line_numbers[parameter])
                 # Split string into list and cast elements into floats
                 minmax_list = [float(val) for val in minmax.split(" ")]
                 # Assign list of min and max floats to inner dictionary
@@ -217,6 +274,8 @@ class AquiModAWS:
     def evaluation_parameters(self, eval_dict: dict[str, pd.DataFrame]) -> None:
         """Set evaluation parameters"""
         for component, df in eval_dict.items():
+            if component == "fit":
+                continue
             df.to_csv(self.evaluation_paths[component], sep="\t", index=False)
 
     def run(
@@ -225,6 +284,7 @@ class AquiModAWS:
         sim_mode: str = None,
         calib_var: str = None,
         num_runs: int = None,
+        write_outputs: list[str] = None,
     ):
         if module_config is not None:
             self.module_config = module_config
@@ -234,9 +294,15 @@ class AquiModAWS:
             self.calibrated_variable = calib_var
         if num_runs is not None:
             self.number_of_runs = num_runs
+        if write_outputs is not None:
+            self.write_outputs = write_outputs
 
-        # self._delete_dir_contents(Path(self.model_dir, "Output"))
-        os.system(f"AquiModAWS {self.model_dir}")
+        self._delete_dir_contents(Path(self.model_dir, "Output"))
+        # os.system(f"AquiModAWS {self.model_dir}")
+
+        subprocess.run(
+            f"AquiModAWS {self.model_dir}", shell=True, stdout=subprocess.DEVNULL
+        )
 
     def read_performance_output(self) -> dict[str, pd.DataFrame]:
         """
@@ -248,7 +314,7 @@ class AquiModAWS:
         # each individual model run.
         # GWLForecaster isn't bothered at all with fit as it is just forecast data.
         if self.simulation_mode == "c":
-            return {
+            output = {
                 component: self._read_data(path)
                 for component, path in self.output_calibration_paths.items()
             }
@@ -260,7 +326,14 @@ class AquiModAWS:
             output["fit"] = pd.read_csv(
                 self.output_evaluation_paths["fit"], sep="\t", index_col=False
             )
-            return output
+
+        if (
+            len(output["fit"]) > 0
+            and output["fit"].loc[0, "ObjectiveFunction"] == "-nan(ind)"
+        ):
+            output["fit"].loc[0, "ObjectiveFunction"] == self.performance_threshold
+
+        return output
 
     def read_timeseries_output(self):
         """Read output timeseries files"""
@@ -268,12 +341,12 @@ class AquiModAWS:
 
     def _cce(
         self,
-        complx: dict[str, pd.DataFrame],
+        complx: pd.DataFrame,
         simplx_size: int,
         alpha: int,
         reflection_coef=1,
         contraction_coef=0.5,
-    ):
+    ) -> dict[str, pd.DataFrame]:
         """
         q: number of points in simplex [2 <= q <= m]
         m: number of points in complex
@@ -315,33 +388,35 @@ class AquiModAWS:
         m = len(complx_df)
         # 1. Calculate triangular distribution
         # Make sure that complx is ordered by ObjectiveFunction
-        complx_df = complx_df.sort_by("ObjectiveFunction", ascending=False)
-        complx_df["weight"] = (2 * (m + 1 + range(1, m + 1))) / (m * (m + 1))
+        complx_df = complx_df.sort_values("ObjectiveFunction", ascending=False)
+        complx_df = complx_df.reset_index(drop=True)
+        complx_df["weight"] = (2 * (m - complx_df.index.to_frame())) / (m * (m + 1))
         # Normalise weights so that their sum == 1
-        complx_df["weight"] /= complx["weight"].sum()
+        complx_df["weight"] /= complx_df["weight"].sum()
         # 2. Select simplx points from weighted complx points
         simplx = complx_df.loc[
             np.random.choice(
                 complx_df.index, simplx_size, replace=False, p=complx_df["weight"]
             )
         ]
+        simplx = simplx.drop("weight", axis=1)
         for _ in range(alpha):
             # 3. Restore order to simplx
-            simplx = simplx.sort_by("ObjectiveFunction", ascending=False)
+            simplx = simplx.sort_values("ObjectiveFunction", ascending=False)
             # 4. Compute centroid of simplx
             centroid = simplx.mean().to_frame().T
             # Drop weight and ObjectiveFunction value of centroid
             # centroid = centroid.drop(["ObjectiveFunction", "weight"], axis=1)
             # 5. Perform reflection step of the worst performing point through centroid
-            worst = simplx.iloc[-1]
+            worst = simplx.iloc[-1].to_frame().T
             worst = worst.reset_index(drop=True)
             new = centroid + reflection_coef * (centroid - worst)
             new = new.reset_index(drop=True)  # is this necessary? yes
             # 6. Check that the new point is still within parameter space
             # Get parameter bounds
-            parameter_lims = pd.concat(self.calibration_parameters.values())
+            parameter_lims = pd.concat(self.calibration_parameters.values(), axis=1)
             within_parameter_space = True
-            for col in new.columns:
+            for col in parameter_lims.columns:
                 minimum = parameter_lims.loc["min", col]
                 maximum = parameter_lims.loc["max", col]
                 if not minimum <= new.loc[0, col] <= maximum:
@@ -352,45 +427,56 @@ class AquiModAWS:
                 # Current parameter calibration limits define parameter space
                 # Although not the smallest possible complx hypercube
                 # Can try and implement this version later
-                self.run(sim_mode="c", num_runs=1)
-            # 8.
+                self.run(sim_mode="c", num_runs=1, write_outputs=["Y", "Y", "Y"])
             else:
+                # 8.
                 # Run AquiMod using the new point
                 # AquiMod must be run in evaluation mode for this
                 # Evaluation files need to be written for each module
                 # Need to separate new into components
                 eval_params = {
-                    component: new[df.cols] for component, df in complx.items()
+                    component: new[df.columns] for component, df in complx.items()
                 }
 
                 self.evaluation_parameters = eval_params
-                self.run(sim_mode="e", num_runs=1)
-
+                self.run(sim_mode="e", num_runs=1, write_outputs=["N", "N", "N"])
             new = pd.concat(self.read_performance_output().values(), axis=1)
+            # This is in case AquiModAWS malfunctions and needs to be rerun
+            while len(new) != 1:
+                # If malfunction, perform mutation
+                self.run(sim_mode="c", num_runs=1, write_outputs=["Y", "Y", "Y"])
+                new = pd.concat(self.read_performance_output().values(), axis=1)
             # 9. Check if new point performs worse than worst point
-            if new.loc[0, "ObjectiveFunction"] < worst[0, "ObjectiveFunction"]:
+            if new.loc[0, "ObjectiveFunction"] < worst.loc[0, "ObjectiveFunction"]:
                 # 10. Contract the worst performing point towards the centroid
                 new = worst + contraction_coef * (centroid - worst)
                 eval_params = {
-                    component: new[df.cols] for component, df in complx.items()
+                    component: new[df.columns] for component, df in complx.items()
                 }
                 self.evaluation_parameters = eval_params
                 # 11. Run AquiMod for new point
-                self.run(sim_mode="e", num_runs=1)
+                self.run(sim_mode="e", num_runs=1, write_outputs=["N", "N", "N"])
                 new = pd.concat(self.read_performance_output().values(), axis=1)
             # 12. Check if new point performs worse than the worst point
-            if new.loc[0, "ObjectiveFunction"] < worst[0, "ObjectiveFunction"]:
+            if new.loc[0, "ObjectiveFunction"] < worst.loc[0, "ObjectiveFunction"]:
                 # 13. Generate random point within parameter space
                 # 14. Run AquiMod for new point
-                self.run(sim_mode="c", num_runs=1)
+                self.run(sim_mode="c", num_runs=1, write_outputs=["Y", "Y", "Y"])
                 new = pd.concat(self.read_performance_output().values(), axis=1)
             # 15. Replace worst performing point with new point in simplx
             simplx.iloc[-1] = new
 
         complx_df.loc[simplx.index] = simplx
 
+        return {component: complx_df[df.columns] for component, df in complx.items()}
+
     def calibrate(
-        self, num_complexes: int, complex_size: int, simplex_size: int, alpha: int
+        self,
+        num_complxes: int,
+        complx_size: int,
+        simplx_size: int,
+        alpha: int,
+        num_cycles: int,
     ) -> dict[str, pd.DataFrame]:
         """
         Calibrate model according to the shuffled complex evolution algorithm.
@@ -417,21 +503,44 @@ class AquiModAWS:
         7. Return to step 3/4.
         """
         # Total sample points
-        sample_size = num_complexes * complex_size
+        sample_size = num_complxes * complx_size
         # 1. Run AquiMod for all points
-        self.run(sim_mode="c", num_runs=sample_size)
+        self.run(sim_mode="c", num_runs=sample_size, write_outputs=["Y", "Y", "Y"])
         # 2. Get results (returned in order of ObjectiveFunction by default)
         population = self.read_performance_output()
-        # DO AWAY WITH DICTIONARY STRUCTURE HERE
-        # 3. Partition into complexes
-        complxes: list[dict[str, pd.DataFrame]] = []
-        for i in range(num_complexes):
-            complx: dict[str, pd.DataFrame] = {}
-            # Create one complex as a dictionary of dataframes
-            for component, df in population.items():
+        population_df = pd.concat(population.values(), axis=1)
+        best_performers: list[pd.DataFrame] = []
+        for i in range(num_cycles):
+            print(f"CYCLE {i + 1}: STARTED")
+            # 3. Partition into complexes
+            complxes: list[pd.DataFrame] = []
+            for j in range(num_complxes):
                 # Create a boolean mask to select rows of the i-th complex
-                bool_mask = [(j % num_complexes) == i for j in range(len(df))]
-                complx[component] = df.iloc[bool_mask]
-            # 4. Implement CCE algorithm here on the complex
-            complx = self._cce(complx, simplex_size, alpha)
+                bool_mask = [(k % num_complxes) == j for k in range(len(population_df))]
+                complx_df = population_df.loc[bool_mask]
+                complx = {
+                    component: complx_df[df.columns]
+                    for component, df in population.items()
+                }
+                # 4. Implement CCE algorithm here
+                complx = self._cce(complx, simplx_size, alpha)
+                complxes.append(pd.concat(complx.values(), axis=1))
+                print(f"\tCOMPLEX {j + 1}: {complx['fit']['ObjectiveFunction'].max()}")
+            # Shuffle complxes back together
+            population_df = pd.concat(complxes)
+            population_df = population_df.sort_values(
+                "ObjectiveFunction", ascending=False
+            )
+            population_df = population_df.reset_index(drop=True)
+            best_performers.append(population_df.loc[0, "ObjectiveFunction"])
+            print(f"\tBEST: {best_performers[-1]}")
+            print(f"\tPOPULATION MEAN: {population_df['ObjectiveFunction'].mean()}")
+            print(f"CYCLE {i + 1}: COMPLETED\n")
+            # if len(best_performers) < 10:
+            #     continue
+            # if (best_performers[-1] / best_performers[-10]) < 1.001:
+            #     break
 
+        return {
+            component: population_df[df.columns] for component, df in population.items()
+        }
