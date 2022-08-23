@@ -1,3 +1,4 @@
+import concurrent.futures
 import os
 import subprocess
 from pathlib import Path
@@ -6,12 +7,9 @@ import numpy as np
 import pandas as pd
 
 # TODO add logging functionality to calibration
-# TODO add parallel computing ability
 # TODO maybe switch from evaluation mode to exclusive calibration mode for performance
 # TODO follow SCE algorithm more closely and separate the performance and parameters
 # that way I can then run
-# TODO for some reason, AquiModAWS sometimes doesn't put any rows in the output files
-# so I need to work out if this is just an AquiModAWS problem or not
 
 
 class AquiModAWS:
@@ -522,10 +520,29 @@ class AquiModAWS:
                     component: complx_df[df.columns]
                     for component, df in population.items()
                 }
+
+            ### Attempted to parallelise complxes here but it didn't work because each
+            ### process requires its own directory of "model"
+            #     complxes.append(complx)
+            # with concurrent.futures.ProcessPoolExecutor() as executor:
+            #     future_list = [
+            #         executor.submit(
+            #             self._cce, complx=complx, simplx_size=simplx_size, alpha=alpha
+            #         )
+            #         for complx in complxes
+            #     ]
+            #     complxes = []
+            #     for j, future in enumerate(future_list):
+            #         result = future.result()
+            #         df = pd.concat(result.values(), axis=1)
+            #         complxes.append(df)
+            #         print(f"\tCOMPLEX {j + 1}: {df['ObjectiveFunction'].max()}")
+
                 # 4. Implement CCE algorithm here
                 complx = self._cce(complx, simplx_size, alpha)
                 complxes.append(pd.concat(complx.values(), axis=1))
                 print(f"\tCOMPLEX {j + 1}: {complx['fit']['ObjectiveFunction'].max()}")
+
             # Shuffle complxes back together
             population_df = pd.concat(complxes)
             population_df = population_df.sort_values(
